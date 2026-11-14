@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import sys
+import threading
+import unicodedata
 
 _APP = "hermes"
 _INTERACTIVE = {"cli", "tui", "desktop"}
@@ -33,6 +36,75 @@ _MSG = {
 }
 _WRAP = "_herdr_osc7501"
 _last: tuple[str, str] | None = None
+_title_lock = threading.RLock()
+_active_state = None
+_last_title: str | None = None
+# Remove complete CSI and OSC/DCS strings before stripping individual controls.
+_TERMINAL_ESCAPE = re.compile(
+    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+    r"|(?:\x1b\]|\x9d|\x1b[P^_]|[\x90\x98\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)"
+    r"|\x1b[ -/]*[@-Z\\-_]"
+)
+
+
+def _title_text(title) -> str:
+    if not isinstance(title, str):
+        return "Hermes"
+    text = _TERMINAL_ESCAPE.sub("", title)
+    text = "".join(" " if c.isspace() else c for c in text
+                   if c.isspace() or unicodedata.category(c) not in {"Cc", "Cf", "Cs"})
+    return " ".join(text.split())[:256] or "Hermes"
+
+
+def _emit_title(title: str) -> None:
+    """Caller holds _title_lock; remember only writes the terminal accepted."""
+    global _last_title
+    if title == _last_title:
+        return
+    seq = "\x1b]2;" + title + "\x1b\\"
+    if os.environ.get("TMUX"):
+        seq = "\x1bPtmux;" + seq.replace("\x1b", "\x1b\x1b") + "\x1b\\"
+    if _write(seq.encode("utf-8")):
+        _last_title = title
+
+
+def _publish_state(state) -> None:
+    """Never query another session or read messages; state is the CLI's exact snapshot."""
+    try:
+        with _title_lock:
+            if state is not _active_state:
+                return
+            info = getattr(state, "info", {})
+            title = info["title"] if isinstance(info, dict) and "title" in info else getattr(state, "title", None)
+            _emit_title(_title_text(title))
+    except Exception:
+        pass  # Display integration must not break a gateway event.
+
+
+def _bind_title(agent) -> None:
+    global _active_state
+    try:
+        with _title_lock:
+            _active_state = agent._state()
+            _publish_state(_active_state)
+    except Exception:
+        pass
+
+
+def _wrap_connection(mod) -> None:
+    cls = getattr(mod, "SessionState", None)
+    if cls is None:
+        return
+
+    def observe(orig):
+        def changed(self, *args, **kwargs):
+            result = orig(self, *args, **kwargs)
+            _publish_state(self)
+            return result
+        return changed
+
+    _wrap(cls, "adopt_snapshot", observe)
+    _wrap(cls, "apply_event", observe)
 
 
 def _platform(kwargs: dict) -> str:
@@ -90,7 +162,7 @@ def _write(payload: bytes) -> bool:
     try:
         out = sys.__stdout__
         if out is not None and out.isatty():
-            out.write(payload.decode("ascii"))
+            out.write(payload.decode("utf-8"))
             out.flush()
             return True
     except Exception:
@@ -109,9 +181,15 @@ def _emit(state: str, *, kind: str | None = None, msg: str | None = None) -> Non
 
 def _force_clear() -> None:
     """Always drop the record. Quit uses os._exit, so this must run on that path."""
-    global _last
-    _last = None
-    _write(sequence("clear").encode("ascii"))
+    global _last, _active_state
+    with _title_lock:
+        _active_state = None
+        _last = None
+        try:
+            _emit_title("")
+        except Exception:
+            pass
+        _write(sequence("clear").encode("ascii"))
 
 
 def _clear() -> None:
@@ -206,8 +284,27 @@ def _wrap_gateway(mod) -> None:
     if cls is None:
         return
 
+    # Hermes repoints this property on new/resume/branch, including at construction.
+    prop = getattr(cls, "session_id", None)
+    if isinstance(prop, property) and prop.fset and not getattr(prop.fset, _WRAP, False):
+        setter = prop.fset
+
+        def select(self, value):
+            global _active_state
+            # Do not hold the lock across the setter: it can wait for a gateway
+            # snapshot delivered by another thread running our state observer.
+            with _title_lock:
+                _active_state = None
+            result = setter(self, value)
+            _bind_title(self)
+            return result
+
+        setattr(select, _WRAP, True)
+        setattr(cls, "session_id", property(prop.fget, select, prop.fdel, prop.__doc__))
+
     def factory(orig):
         def run_conversation(self, *args, **kwargs):
+            _bind_title(self)
             _emit("working")
             try:
                 result = orig(self, *args, **kwargs)
@@ -257,13 +354,9 @@ def _install_cli_wrap() -> None:
 
     def hooked(name, globals=None, locals=None, fromlist=(), level=0):
         mod = orig(name, globals, locals, fromlist, level)
-        base = name.rpartition(".")[2]
-        if base == "gateway_agent":
-            _wrap_gateway(mod)
-        elif base == "cli_modal_mixin":
-            _wrap_modals(mod)
-        elif base in ("cli", "cli_session_mixin"):
-            _wrap_cli_exit(mod)
+        # __import__('hermes_cli.gateway_agent') may return the package. Look
+        # up completed modules by their actual names for every import form.
+        _patch_loaded()
         return mod
 
     builtins.__import__ = hooked
@@ -300,6 +393,9 @@ def _wrap_cli_exit(mod) -> None:
 
 
 def _patch_loaded() -> None:
+    conn = sys.modules.get("hermes_cli.gateway_connection")
+    if conn is not None:
+        _wrap_connection(conn)
     gw = sys.modules.get("hermes_cli.gateway_agent")
     if gw is not None:
         _wrap_gateway(gw)
