@@ -163,6 +163,36 @@ class Titles(unittest.TestCase):
         self.select()
         self.assertEqual(len(self.titles()), 1)
 
+    def test_resumed_title_before_first_agent_is_created(self):
+        from hermes_cli.cli_init_mixin import CLIInitMixin
+        from typing import Any
+        class CLI(CLIInitMixin):
+            pass
+        self.plugin._wrap_cli_titles(types.SimpleNamespace(HermesCLI=CLI))
+        cli: Any = object.__new__(CLI)
+        cli.session_id = "resumed"
+        cli.agent = None
+        cli._session_db = types.SimpleNamespace(connection=self.connection)
+        self.connection.state("resumed").adopt_snapshot({"info": {"title": "Idle resumed conversation"}})
+        self.assertEqual(self.titles()[-1:], [b"\x1b]2;Idle resumed conversation\x1b\\"])
+        self.connection.state("resumed").apply_event("session.updated", {"title": "Idle rename"})
+        self.assertEqual(self.titles()[-1:], [b"\x1b]2;Idle rename\x1b\\"])
+
+    def test_resume_before_first_chat_rebinds_cli_title(self):
+        from typing import Any
+        class CLI:
+            pass
+        self.plugin._wrap_cli_titles(types.SimpleNamespace(HermesCLI=CLI))
+        cli: Any = CLI()
+        cli._session_db = types.SimpleNamespace(connection=self.connection)
+        self.connection.state("one").adopt_snapshot({"info": {"title": "First idle conversation"}})
+        self.connection.state("two").adopt_snapshot({"info": {"title": "Second idle conversation"}})
+        cli.session_id = "one"
+        cli.agent = None
+        cli.session_id = "two"
+        self.connection.state("one").apply_event("session.updated", {"title": "Stale idle conversation"})
+        self.assertEqual(self.titles()[-1:], [b"\x1b]2;Second idle conversation\x1b\\"])
+
     def test_import_hook_covers_startup_and_preloaded_modules(self):
         import subprocess
         for preload in (False, True):
@@ -197,6 +227,23 @@ print("startup wrappers installed")
         self.assertEqual(self.output, [b"\x1b]7501;state=working:app=hermes\x1b\\",
             b"\x1b]7501;state=blocked:app=hermes:kind=question:msg=V2FpdGluZyBmb3IgYW4gYW5zd2Vy\x1b\\",
             b"\x1b]7501;state=done:app=hermes\x1b\\"])
+
+    def test_short_terminal_writes_complete_the_payload(self):
+        accepted = bytearray()
+        def short_write(fd, data):
+            accepted.extend(data[:2])
+            return min(2, len(data))
+        with patch.object(self.plugin.os, "open", return_value=99), patch.object(self.plugin.os, "close"), \
+             patch.object(self.plugin.os, "write", side_effect=short_write):
+            self.writer.stop()
+            self.assertTrue(self.plugin._write(b"complete payload"))
+        self.assertEqual(accepted, b"complete payload")
+
+    def test_zero_progress_terminal_write_fails(self):
+        with patch.object(self.plugin.os, "open", return_value=99), patch.object(self.plugin.os, "close"), \
+             patch.object(self.plugin.os, "write", return_value=0):
+            self.writer.stop()
+            self.assertFalse(self.plugin._write(b"payload"))
 
     def test_utf8_stdout_fallback(self):
         class Output(io.StringIO):

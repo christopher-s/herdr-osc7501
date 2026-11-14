@@ -38,6 +38,7 @@ _WRAP = "_herdr_osc7501"
 _last: tuple[str, str] | None = None
 _title_lock = threading.RLock()
 _active_state = None
+_active_cli = None
 _last_title: str | None = None
 # Remove complete CSI and OSC/DCS strings before stripping individual controls.
 _TERMINAL_ESCAPE = re.compile(
@@ -72,7 +73,15 @@ def _publish_state(state) -> None:
     """Never query another session or read messages; state is the CLI's exact snapshot."""
     try:
         with _title_lock:
-            if state is not _active_state:
+            if _active_cli is not None:
+                # Main creates its agent lazily; the CLI session is authoritative
+                # even before the first message constructs a GatewayAgent.
+                store = getattr(_active_cli, "_session_db", None)
+                conn = getattr(store, "connection", None)
+                sid = getattr(_active_cli, "session_id", None)
+                if conn is None or not sid or conn.state(sid) is not state:
+                    return
+            elif state is not _active_state:
                 return
             info = getattr(state, "info", {})
             title = info["title"] if isinstance(info, dict) and "title" in info else getattr(state, "title", None)
@@ -105,6 +114,33 @@ def _wrap_connection(mod) -> None:
 
     _wrap(cls, "adopt_snapshot", observe)
     _wrap(cls, "apply_event", observe)
+
+
+def _wrap_cli_titles(mod) -> None:
+    cls = getattr(mod, "HermesCLI", None)
+    if cls is None:
+        return
+
+    def factory(orig):
+        def assigned(self, name, value):
+            global _active_cli, _active_state
+            result = orig(self, name, value)
+            if name in {"session_id", "_session_db"}:
+                try:
+                    with _title_lock:
+                        _active_cli = self
+                        _active_state = None
+                        store = getattr(self, "_session_db", None)
+                        conn = getattr(store, "connection", None)
+                        sid = getattr(self, "session_id", None)
+                        if conn is not None and sid:
+                            _publish_state(conn.state(sid))
+                except Exception:
+                    pass
+            return result
+        return assigned
+
+    _wrap(cls, "__setattr__", factory)
 
 
 def _platform(kwargs: dict) -> str:
@@ -153,7 +189,12 @@ def _write(payload: bytes) -> bool:
         fd = -1
     if fd >= 0:
         try:
-            os.write(fd, payload)
+            pending = memoryview(payload)
+            while pending:
+                written = os.write(fd, pending)
+                if written <= 0:
+                    return False
+                pending = pending[written:]
             return True
         except Exception:
             return False
@@ -181,9 +222,10 @@ def _emit(state: str, *, kind: str | None = None, msg: str | None = None) -> Non
 
 def _force_clear() -> None:
     """Always drop the record. Quit uses os._exit, so this must run on that path."""
-    global _last, _active_state
+    global _last, _active_state, _active_cli
     with _title_lock:
         _active_state = None
+        _active_cli = None
         _last = None
         try:
             _emit_title("")
@@ -406,6 +448,7 @@ def _patch_loaded() -> None:
         mod = sys.modules.get(key)
         if mod is not None:
             _wrap_cli_exit(mod)
+            _wrap_cli_titles(mod)
 
 
 def register(ctx) -> None:

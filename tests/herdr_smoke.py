@@ -29,16 +29,21 @@ def child():
     # Install before importing the SDK, as in an actual CLI startup.
     plugin._install_cli_wrap()
     from hermes_cli.gateway_connection import SessionState
-    from hermes_cli.gateway_agent import GatewayAgent
+    from cli import HermesCLI
     from test_plugin import Connection
     connection = Connection(SessionState)
+    # The real CLI class opens a session before lazily constructing its agent.
+    # Bypass only its interactive constructor; exercise its wrapped assignments.
+    from types import SimpleNamespace
+    cli = object.__new__(HermesCLI)
+    cli.session_id = "smoke"
+    cli._session_db = SimpleNamespace(connection=connection)
     connection.state("smoke").adopt_snapshot({"info": {"title": "Winston · 日本語 🐾"}})
-    agent = GatewayAgent(connection=connection, session_id="smoke")
     plugin._emit("idle")
     print("READY", flush=True)
     for command in sys.stdin:
         if command.strip() == "rename":
-            connection.state(agent.session_id).apply_event("session.updated", {"title": "Renamed conversation"})
+            connection.state(cli.session_id).apply_event("session.updated", {"title": "Renamed conversation"})
         elif command.strip() == "clear":
             plugin._force_clear()
         elif command.strip() == "exit":
