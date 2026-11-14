@@ -195,6 +195,34 @@ class Vitals(unittest.TestCase):
         path = Path(self.tmp.name) / "t9.json"
         self.assertTrue(path.exists(), "wrap must land a vitals file")
 
+    def test_suppression_blank_under_herdr_and_silent_without(self):
+        """Phase 3: hint_pairs -> [] and field set -> empty under Herdr;
+        untouched in a plain terminal."""
+        import types as _t
+
+        class Cli:
+            def _get_status_bar_field_set(self):
+                return None
+
+        class Layout:
+            def hint_pairs(self, cli):
+                return [("/", "commands")]
+
+        layout, bar = _t.SimpleNamespace(hint_pairs=Layout.hint_pairs), _t.SimpleNamespace(Cli=Cli)
+        os.environ["HC_TERMINAL_ID"] = "t0"
+        self.plugin._suppress_active = False
+        self.plugin._suppress_footer_hints(layout)
+        self.plugin._suppress_status_fields(bar)
+        self.assertEqual(layout.hint_pairs(object()), [])
+        self.assertEqual(Cli()._get_status_bar_field_set(), frozenset())
+
+        # plain terminal: no patch at all
+        fresh_layout = _t.SimpleNamespace(hint_pairs=Layout.hint_pairs)
+        self.plugin._suppress_active = False
+        del os.environ["HC_TERMINAL_ID"]
+        self.plugin._suppress_footer_hints(fresh_layout)
+        self.assertEqual(fresh_layout.hint_pairs(object()), [("/", "commands")])
+
 
 if __name__ == "__main__":
     unittest.main()

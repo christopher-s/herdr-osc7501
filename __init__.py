@@ -75,6 +75,7 @@ _vitals_last_payload: dict | None = None
 _vitals_own_path: str | None = None
 _vitals_orig_snapshot: dict = {}
 _vitals_in_sample = False
+_suppress_active = False
 # Remove complete CSI and OSC/DCS strings before stripping individual controls.
 _TERMINAL_ESCAPE = re.compile(
     r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
@@ -325,6 +326,61 @@ def _wrap_status_bar(mod) -> None:
         return snapshot
 
     _wrap(mixin_cls, "_get_status_bar_snapshot", factory)
+
+
+def _suppress_footer_hints(layout_mod) -> None:
+    """Phase 3: blank the CLI footer under Herdr — the Herdr Vitals bar
+    already shows this telemetry. Patches ``hint_pairs`` (right-half key
+    hints) to return ``[]`` and the status-bar field set to empty (left
+    segments) while ``$HC_TERMINAL_ID`` is set. Idempotent, fail-open.
+    """
+    global _suppress_active
+    if _suppress_active or layout_mod is None:
+        return
+    try:
+        import os as _os
+
+        if not _os.environ.get("HC_TERMINAL_ID"):
+            return  # plain terminal: leave the CLI footer untouched
+    except Exception:
+        return
+
+    def hint_factory(orig):
+        def hints(cli):
+            return []
+        hints.__name__ = orig.__name__
+        return hints
+
+    _wrap(layout_mod, "hint_pairs", hint_factory)
+    _suppress_active = True
+
+
+def _suppress_status_fields(bar_mod) -> None:
+    """Empty field set under Herdr: left segments and the cwd/branch tail
+    both gate on ``field_set is None``, so an empty frozenset blanks them
+    (``display.status_bar.fields: []`` is a no-op in the CLI — only a
+    non-empty list customizes). Idempotent, fail-open, Herdr-only."""
+    global _suppress_active
+    if _suppress_active or bar_mod is None:
+        return
+    try:
+        import os as _os
+
+        if not _os.environ.get("HC_TERMINAL_ID"):
+            return
+    except Exception:
+        return
+
+    def field_factory(orig):
+        def field_set(self, *args, **kwargs):
+            return frozenset()
+        field_set.__name__ = orig.__name__
+        return field_set
+
+    for value in vars(bar_mod).values():
+        if isinstance(value, type) and hasattr(value, "_get_status_bar_field_set"):
+            _wrap(value, "_get_status_bar_field_set", field_factory)
+            _suppress_active = True
 
 
 def _platform(kwargs: dict) -> str:
@@ -673,6 +729,10 @@ def _patch_loaded() -> None:
     bar = sys.modules.get("hermes_cli.cli_status_bar_mixin")
     if bar is not None:
         _wrap_status_bar(bar)
+    layout = sys.modules.get("hermes_cli.cli_modern_layout")
+    if layout is not None:
+        _suppress_footer_hints(layout)
+        _suppress_status_fields(bar)
     for key in ("cli", "hermes_cli.cli_session_mixin"):
         mod = sys.modules.get(key)
         if mod is not None:
