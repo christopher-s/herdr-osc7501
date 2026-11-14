@@ -12,10 +12,12 @@ for in-process runs (one-shot, no gateway).
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import sys
 import threading
+import time
 import unicodedata
 
 _APP = "hermes"
@@ -44,6 +46,25 @@ _title_lock = threading.RLock()
 _active_state = None
 _active_cli = None
 _last_title: str | None = None
+
+# --- Vitals sidecar (contract v1) -----------------------------------------
+# One JSON file per hc terminal under ~/.config/herdr-app/data/hermes-vitals/,
+# named by $HC_TERMINAL_ID. Herdr mods read the directory; the file is the
+# whole contract. Gated, throttled, and fail-open: nothing here may ever
+# break a turn.
+_VITALS_MIN_INTERVAL = 0.5
+_VITALS_SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+# Snapshot keys we copy, in both spellings the CLI has used.
+_VITALS_FIELDS = (
+    "model", "context_pct", "context_detail", "tps", "latency", "latency_ms",
+    "cache_hit", "total_tokens", "compressions", "duration", "duration_s",
+    "bg_tasks", "bg_processes", "bg_subagents", "goal", "prompt_elapsed",
+    "state",
+)
+_vitals_dir_override: str | None = None
+_vitals_last_write = 0.0
+_vitals_last_payload: dict | None = None
+_vitals_own_path: str | None = None
 # Remove complete CSI and OSC/DCS strings before stripping individual controls.
 _TERMINAL_ESCAPE = re.compile(
     r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
@@ -159,6 +180,96 @@ def _wrap_cli_titles(mod) -> None:
     _wrap(cls, "__setattr__", factory)
 
 
+def _vitals_enabled() -> bool:
+    """True only inside an hc terminal with a sane address (t3, devbox/t7)."""
+    term = os.environ.get("HC_TERMINAL_ID", "")
+    if not term or "/" in term.replace("/", "", 1):
+        return False
+    return all(_VITALS_SEGMENT.match(part) for part in term.split("/"))
+
+
+def _vitals_dir() -> str:
+    if _vitals_dir_override is not None:
+        return _vitals_dir_override
+    base = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
+    return os.path.join(base, "data", "hermes-vitals")
+
+
+def _vitals_write(payload: dict) -> str | None:
+    """Atomic write of one terminal's vitals file. Fail-open."""
+    global _vitals_own_path
+    if not _vitals_enabled():
+        return None
+    try:
+        directory = _vitals_dir()
+        term = os.environ["HC_TERMINAL_ID"]
+        path = os.path.join(directory, f"{term}.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, path)
+        _vitals_own_path = path
+        return path
+    except Exception:
+        return None
+
+
+def _vitals_sample(cli) -> str | None:
+    """Read the CLI's own status snapshot; write when values changed."""
+    global _vitals_last_write, _vitals_last_payload
+    if not _vitals_enabled():
+        return None
+    now = time.monotonic()
+    try:
+        snapshot = cli._get_status_bar_snapshot()
+    except Exception:
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    payload = {"v": 1, "term": os.environ["HC_TERMINAL_ID"], "ts": time.time()}
+    for key in _VITALS_FIELDS:
+        value = snapshot.get(key)
+        if value is not None:
+            payload[key] = value
+    if _vitals_last_payload is not None and payload == _vitals_last_payload:
+        return None
+    if now - _vitals_last_write < _VITALS_MIN_INTERVAL and _vitals_last_payload is not None:
+        return None
+    path = _vitals_write(payload)
+    if path is not None:
+        _vitals_last_write = now
+        _vitals_last_payload = payload
+    return path
+
+
+def _vitals_cleanup() -> None:
+    """Remove our own vitals file; never raises."""
+    global _vitals_own_path
+    path, _vitals_own_path = _vitals_own_path, None
+    if path:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
+
+def _vitals_reset_for_tests(dirpath=None) -> None:
+    """Fresh module state, optional directory override; tests only."""
+    global _vitals_dir_override, _vitals_last_write, _vitals_last_payload, _vitals_own_path
+    _vitals_dir_override = str(dirpath) if dirpath is not None else None
+    _vitals_last_write = 0.0
+    _vitals_last_payload = None
+    _vitals_own_path = None
+
+
+def _vitals_maybe_sample() -> None:
+    """Publish the active CLI's vitals if we have one. Fail-open."""
+    cli = _active_cli
+    if cli is not None:
+        _vitals_sample(cli)
+
+
 def _platform(kwargs: dict) -> str:
     plat = kwargs.get("platform")
     if isinstance(plat, str) and plat.strip():
@@ -234,6 +345,7 @@ def _emit(state: str, *, kind: str | None = None, msg: str | None = None) -> Non
         return
     if _write(sequence(state, kind=kind, msg=msg).encode("ascii")):
         _last = key
+        _vitals_maybe_sample()
 
 
 def _force_clear() -> None:
@@ -262,6 +374,8 @@ def _on_exit() -> None:
         _clear()
     except Exception:
         return
+    finally:
+        _vitals_cleanup()
 
 
 def _install_exit_clear() -> None:
