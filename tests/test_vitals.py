@@ -114,7 +114,7 @@ class Vitals(unittest.TestCase):
         wrote = self.sample(cli)
         data = json.loads(Path(wrote).read_text())
         self.assertNotIn("avg_velocity", data)
-        self.assertAlmostEqual(data["context_pct"], 23.0)
+        self.assertAlmostEqual(data["context_percent"], 23.0)
 
     def test_exit_cleans_own_file(self):
         os.environ["HC_TERMINAL_ID"] = "t6"
