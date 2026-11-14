@@ -35,7 +35,8 @@ def child():
     # The real CLI class opens a session before lazily constructing its agent.
     # Bypass only its interactive constructor; exercise its wrapped assignments.
     from types import SimpleNamespace
-    cli = object.__new__(HermesCLI)
+    from typing import Any
+    cli: Any = object.__new__(HermesCLI)
     cli.session_id = "smoke"
     cli._session_db = SimpleNamespace(connection=connection)
     connection.state("smoke").adopt_snapshot({"info": {"title": "Winston · 日本語 🐾"}})
