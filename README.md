@@ -58,7 +58,14 @@ session without a title shows `Hermes`; quitting clears it. Unicode is supported
 terminal control sequences are removed, and titles are capped at 256 characters.
 There are no additional model calls, transcript reads or database polling.
 
-Status reporting remains OSC 7501. Title support targets the gateway-backed
+Status reporting remains OSC 7501, now with real messages: a blocked session
+carries the approval command (or its human description when the command is
+longer than 70 characters), the first clarify question, or the sign-in prompt;
+a finished turn carries the first line of its reply as `msg`. Messages are
+sanitized to one line and capped at 120 characters; failures carry the error's
+first line. `hc get <terminal>` exposes `status.msg` for mods and scripts.
+
+Title support targets the gateway-backed
 classic CLI's `GatewayAgent` and `SessionState` contracts; other Hermes surfaces
 retain their existing status reporting. Missing optional SDK methods are skipped.
 The integration uses guarded private CLI seams, so rerun the tests after Hermes

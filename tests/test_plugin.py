@@ -257,8 +257,6 @@ print("startup wrappers installed")
         self.assertEqual(out.getvalue(), "\x1b]2;日本語\x1b\\")
 
 
-if __name__ == "__main__":
-    unittest.main()
 class Messages(unittest.TestCase):
     def setUp(self):
         self.plugin = load_plugin()
@@ -356,15 +354,35 @@ class Messages(unittest.TestCase):
         done = [r for r in self.reports() if b"state=done" in r]
         self.assertEqual(done, [b"\x1b]7501;state=done:app=hermes\x1b\\"])
 
+    def test_error_carries_sanitized_error_text(self):
+        self.plugin._finish_from_result({"failed": True, "error": "Gateway lost\nretry later"})
+        error = [r for r in self.reports() if b"state=error" in r]
+        self.assertEqual(self.msg_of(error[-1]), "Gateway lost")
+
     def test_failed_and_interrupted_omit_headline(self):
         self.plugin._finish_from_result({"failed": True, "final_response": "boom"})
         self.plugin._finish_from_result({"interrupted": True, "final_response": "halted"})
         self.assertEqual([r for r in self.reports() if b"state=done" in r], [])
 
-    def test_hook_path_blocked_and_done_messages(self):
-        self.plugin._on_blocked(kind="approval", platform="cli", summary="Rebuild the index?")
+    def test_hook_path_blocked_uses_real_payload_keys(self):
+        # pre_approval_request actually carries command/description.
+        self.plugin._on_blocked(kind="approval", platform="cli",
+                                command="Rebuild the index?", description="Rebuild")
         blocked = [r for r in self.reports() if b"state=blocked" in r]
         self.assertEqual(self.msg_of(blocked[-1]), "Rebuild the index?")
-        self.plugin._on_turn_end(platform="cli", response="Migration finished. Rows copied: 42")
+        # on_human_input_request actually carries prompt.
+        self.plugin._on_blocked(kind="clarify", platform="cli", prompt="Which region?")
+        blocked = [r for r in self.reports() if b"state=blocked" in r]
+        self.assertEqual(self.msg_of(blocked[-1]), "Which region?")
+        # A long command falls back to its description.
+        self.plugin._on_blocked(kind="approval", platform="cli",
+                                command="x" * 120, description="Install dependencies")
+        blocked = [r for r in self.reports() if b"state=blocked" in r]
+        self.assertEqual(self.msg_of(blocked[-1]), "Install dependencies")
+        # on_session_end carries no reply text: done stays without a headline.
+        self.plugin._on_turn_end(platform="cli")
         done = [r for r in self.reports() if b"state=done" in r]
-        self.assertEqual(self.msg_of(done[-1]), "Migration finished. Rows copied: 42")
+        self.assertEqual(done[-1], b"\x1b]7501;state=done:app=hermes\x1b\\")
+
+if __name__ == "__main__":
+    unittest.main()

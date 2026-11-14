@@ -1,6 +1,6 @@
 name: herdr-osc7501
-version: "1.1.0"
-description: Report Hermes status and native conversation titles to Herdr
+version: "1.2.0"
+description: Report Hermes status, messages and conversation titles to Herdr
 provides_hooks:
   - on_session_start
   - on_session_reset

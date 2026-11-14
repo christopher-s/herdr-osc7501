@@ -306,13 +306,25 @@ def _on_turn_end(**kwargs) -> None:
     elif kwargs.get("failed"):
         _report("error", kwargs)
     else:
-        _report("done", kwargs, msg=_message_text(kwargs.get("response")))
+        # on_session_end carries no reply text; the CLI wrapper adds the headline.
+        _report("done", kwargs)
 
 
 def _on_blocked(**kwargs) -> None:
     kind = _KIND.get(str(kwargs.get("kind") or "permission"), "permission")
-    _report("blocked", kwargs, kind=kind,
-            msg=_message_text(kwargs.get("summary")) or _MSG.get(kind))
+    # Real payloads: pre_approval_request carries command/description,
+    # on_human_input_request carries prompt. Anything else stays generic.
+    text = None
+    command = kwargs.get("command")
+    if isinstance(command, str) and command and len(command) <= _LONG_COMMAND:
+        text = command
+    else:
+        for key in ("description", "prompt"):
+            candidate = _message_text(kwargs.get(key))
+            if candidate:
+                text = candidate
+                break
+    _report("blocked", kwargs, kind=kind, msg=text or _MSG.get(kind))
 
 
 def _finish_from_result(result) -> None:
