@@ -77,6 +77,7 @@ _vitals_orig_snapshot: dict = {}
 _vitals_in_sample = False
 _suppress_hints = False
 _suppress_fields = False
+_suppress_window = False
 _vitals_thread = None
 # Remove complete CSI and OSC/DCS strings before stripping individual controls.
 _TERMINAL_ESCAPE = re.compile(
@@ -339,13 +340,11 @@ def _suppress_footer_hints(layout_mod) -> None:
     global _suppress_hints
     if _suppress_hints or layout_mod is None:
         return
-    try:
-        import os as _os
-
-        if not _os.environ.get("HC_TERMINAL_ID"):
-            return  # plain terminal: leave the CLI footer untouched
-    except Exception:
-        return
+    # NB: no imports here — the module-level `os` is used. A function-local
+    # import fires the __import__ hook -> _patch_loaded -> this function;
+    # without a pre-import guard that recursed infinitely (2026-11-14).
+    if not os.environ.get("HC_TERMINAL_ID"):
+        return  # plain terminal: leave the CLI footer untouched
 
     def hint_factory(orig):
         def hints(cli):
@@ -401,15 +400,13 @@ def _suppress_status_bar_window(cli_mod) -> None:
     is set at CLI init from ``_status_bar_visible_from_display_config`` —
     patch that (imported from the ``cli`` module at call time) so init
     itself decides False; the heartbeat re-asserts it on the live instance
-    as a backstop. Fail-open, Herdr-only."""
-    if cli_mod is None:
+    as a backstop. Fail-open, Herdr-only. No function-local imports: they
+    fire the __import__ hook -> _patch_loaded -> here (infinite recursion,
+    2026-11-14); the module-level ``os`` is used instead."""
+    global _suppress_window
+    if _suppress_window or cli_mod is None:
         return
-    try:
-        import os as _os
-
-        if not _os.environ.get("HC_TERMINAL_ID"):
-            return
-    except Exception:
+    if not os.environ.get("HC_TERMINAL_ID"):
         return
 
     def visible_factory(orig):
@@ -430,12 +427,7 @@ def _suppress_status_fields(bar_mod) -> None:
     global _suppress_fields
     if _suppress_fields or bar_mod is None:
         return
-    try:
-        import os as _os
-
-        if not _os.environ.get("HC_TERMINAL_ID"):
-            return
-    except Exception:
+    if not os.environ.get("HC_TERMINAL_ID"):
         return
 
     def field_factory(orig):
