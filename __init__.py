@@ -311,7 +311,7 @@ def _wrap_status_bar(mod) -> None:
     def factory(orig):
         def snapshot(self, *args, **kwargs):
             result = orig(self, *args, **kwargs)
-            global _active_cli
+            global _active_cli, _vitals_in_sample
             _active_cli = self
             if not _vitals_in_sample:
                 _vitals_in_sample = True

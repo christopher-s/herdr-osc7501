@@ -175,6 +175,26 @@ class Vitals(unittest.TestCase):
             Cli._get_status_bar_snapshot = orig
         self.assertEqual(build_calls["n"], 1)  # built exactly once — never re-entered
 
+    def test_real_wrap_installs_and_writes(self):
+        """Exercise _wrap_status_bar itself (an emulated wrap hid the
+        UnboundLocalError bug, 2026-11-14)."""
+        import types as _t
+
+        class Mixin:
+            def _get_status_bar_snapshot(self, *a, **k):
+                return {"model_short": "wrapped"}
+
+        mod = _t.SimpleNamespace(Mixin=Mixin)
+        self.plugin._wrap_status_bar(mod)
+        self.assertIn(Mixin, self.plugin._vitals_orig_snapshot)
+        cli = Mixin()
+        os.environ["HC_TERMINAL_ID"] = "t9"
+        # must not raise (the UnboundLocalError path) and must write
+        result = cli._get_status_bar_snapshot()
+        self.assertEqual(result["model_short"], "wrapped")
+        path = Path(self.tmp.name) / "t9.json"
+        self.assertTrue(path.exists(), "wrap must land a vitals file")
+
 
 if __name__ == "__main__":
     unittest.main()
