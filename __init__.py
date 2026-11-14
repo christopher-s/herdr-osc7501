@@ -77,6 +77,7 @@ _vitals_orig_snapshot: dict = {}
 _vitals_in_sample = False
 _suppress_hints = False
 _suppress_fields = False
+_vitals_thread = None
 # Remove complete CSI and OSC/DCS strings before stripping individual controls.
 _TERMINAL_ESCAPE = re.compile(
     r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
@@ -354,6 +355,71 @@ def _suppress_footer_hints(layout_mod) -> None:
 
     _wrap(layout_mod, "hint_pairs", hint_factory)
     _suppress_hints = True
+
+
+def _vitals_heartbeat() -> None:
+    """Sample on a timer while the CLI idles. The footer wrap was the only
+    idle-time snapshot caller; phase 3 collapses that window under Herdr,
+    so this thread keeps the vitals file fresh (aligned to the writer's
+    500 ms throttle; cheap no-op inside the window)."""
+    global _vitals_thread
+    if _vitals_thread is not None:
+        return
+
+    def run() -> None:
+        import threading
+        import time as _time
+        import os as _os
+
+        under_herdr = bool(_os.environ.get("HC_TERMINAL_ID"))
+        while True:
+            _time.sleep(0.5)
+            cli = _active_cli
+            if cli is None:
+                continue
+            try:
+                if under_herdr:
+                    # backstop: instance attr must stay False even if init
+                    # ran before the patch or a resize reset it
+                    if getattr(cli, "_status_bar_visible", True):
+                        cli._status_bar_visible = False
+                build = _vitals_orig_snapshot.get(cli.__class__)
+                if build is not None:
+                    _vitals_sample(cli, snapshot=build(cli))
+            except Exception:
+                pass
+
+    t = threading.Thread(target=run, name="herdr-vitals-heartbeat", daemon=True)
+    t.start()
+    _vitals_thread = t
+
+
+def _suppress_status_bar_window(cli_mod) -> None:
+    """Phase 3b: collapse the footer WINDOW under Herdr. Empty fragments
+    still occupy a row; ``_status_bar_visible = False`` removes the
+    ConditionalContainer from the layout entirely. The instance attribute
+    is set at CLI init from ``_status_bar_visible_from_display_config`` —
+    patch that (imported from the ``cli`` module at call time) so init
+    itself decides False; the heartbeat re-asserts it on the live instance
+    as a backstop. Fail-open, Herdr-only."""
+    if cli_mod is None:
+        return
+    try:
+        import os as _os
+
+        if not _os.environ.get("HC_TERMINAL_ID"):
+            return
+    except Exception:
+        return
+
+    def visible_factory(orig):
+        def visible(display_config, *args, **kwargs):
+            return False
+        visible.__name__ = orig.__name__
+        return visible
+
+    if hasattr(cli_mod, "_status_bar_visible_from_display_config"):
+        _wrap(cli_mod, "_status_bar_visible_from_display_config", visible_factory)
 
 
 def _suppress_status_fields(bar_mod) -> None:
@@ -739,6 +805,8 @@ def _patch_loaded() -> None:
         if mod is not None:
             _wrap_cli_exit(mod)
             _wrap_cli_titles(mod)
+            _suppress_status_bar_window(mod)
+            _vitals_heartbeat()
 
 
 def register(ctx) -> None:

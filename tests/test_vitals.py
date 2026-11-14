@@ -225,6 +225,25 @@ class Vitals(unittest.TestCase):
         self.plugin._suppress_footer_hints(fresh_layout)
         self.assertEqual(fresh_layout.hint_pairs(object()), [("/", "commands")])
 
+    def test_status_bar_window_collapses_under_herdr(self):
+        """Phase 3b: _status_bar_visible_from_display_config -> False under
+        Herdr (footer Window leaves the layout), untouched otherwise."""
+        import types as _t
+
+        def original(display_config, *a, **k):
+            return True
+
+        cli_mod = _t.SimpleNamespace(_status_bar_visible_from_display_config=original)
+        os.environ["HC_TERMINAL_ID"] = "t0"
+        setattr(self.plugin, "_suppress_status_bar_window_done", False)
+        self.plugin._suppress_status_bar_window(cli_mod)
+        self.assertIs(cli_mod._status_bar_visible_from_display_config({}), False)
+
+        fresh = _t.SimpleNamespace(_status_bar_visible_from_display_config=original)
+        del os.environ["HC_TERMINAL_ID"]
+        self.plugin._suppress_status_bar_window(fresh)
+        self.assertIs(fresh._status_bar_visible_from_display_config({}), True)
+
 
 if __name__ == "__main__":
     unittest.main()
