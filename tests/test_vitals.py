@@ -155,13 +155,14 @@ class Vitals(unittest.TestCase):
                 return {"model_short": "probe", "duration": "1s"}
 
         orig = Cli._get_status_bar_snapshot
+        case = self
         plugin = self.plugin
 
         def wrapped(self):
             result = orig(self)
             setattr(plugin, "_active_cli", self)
             w = plugin._vitals_sample(self, snapshot=result)
-            self.assertIsNotNone(w)
+            case.assertIsNotNone(w)
             return result
 
         Cli._get_status_bar_snapshot = wrapped
