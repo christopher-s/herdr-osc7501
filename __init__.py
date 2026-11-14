@@ -265,25 +265,42 @@ def _vitals_reset_for_tests(dirpath=None) -> None:
 
 def _vitals_maybe_sample() -> None:
     """Publish the active CLI's vitals if we have one. Fail-open."""
-    try:
-        with open("/tmp/vitals-debug.log", "a") as dbg:
-            cli = _active_cli
-            dbg.write(f"maybe: gate={_vitals_enabled()} cli={cli is not None} "
-                      f"has_snap={hasattr(cli, '_get_status_bar_snapshot')}\n")
-    except Exception:
-        pass
     cli = _active_cli
     if cli is not None:
         try:
-            path = _vitals_sample(cli)
-            with open("/tmp/vitals-debug.log", "a") as dbg:
-                dbg.write(f"sample -> {path}\n")
-        except Exception as exc:
+            _vitals_sample(cli)
+        except Exception:
+            pass
+
+
+def _wrap_status_bar(mod) -> None:
+    """Bind the CLI and sample wherever the bar itself renders from.
+
+    The CLI calls ``_get_status_bar_snapshot`` for every status-bar frame;
+    wrapping it captures ``self`` on first render with no timing assumptions
+    and samples at exactly the cadence the visible bar shows. Idempotent.
+    """
+    mixin_cls = None
+    for value in vars(mod).values():
+        if isinstance(value, type) and hasattr(value, "_get_status_bar_snapshot"):
+            mixin_cls = value
+            break
+    if mixin_cls is None:
+        return
+
+    def factory(orig):
+        def snapshot(self, *args, **kwargs):
+            result = orig(self, *args, **kwargs)
+            global _active_cli
+            _active_cli = self
             try:
-                with open("/tmp/vitals-debug.log", "a") as dbg:
-                    dbg.write(f"sample raised {exc!r}\n")
+                _vitals_sample(self)
             except Exception:
                 pass
+            return result
+        return snapshot
+
+    _wrap(mixin_cls, "_get_status_bar_snapshot", factory)
 
 
 def _platform(kwargs: dict) -> str:
@@ -630,6 +647,9 @@ def _patch_loaded() -> None:
     modal = sys.modules.get("hermes_cli.cli_modal_mixin")
     if modal is not None:
         _wrap_modals(modal)
+    bar = sys.modules.get("hermes_cli.cli_status_bar_mixin")
+    if bar is not None:
+        _wrap_status_bar(bar)
     for key in ("cli", "hermes_cli.cli_session_mixin"):
         mod = sys.modules.get(key)
         if mod is not None:
