@@ -75,7 +75,8 @@ _vitals_last_payload: dict | None = None
 _vitals_own_path: str | None = None
 _vitals_orig_snapshot: dict = {}
 _vitals_in_sample = False
-_suppress_active = False
+_suppress_hints = False
+_suppress_fields = False
 # Remove complete CSI and OSC/DCS strings before stripping individual controls.
 _TERMINAL_ESCAPE = re.compile(
     r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
@@ -334,8 +335,8 @@ def _suppress_footer_hints(layout_mod) -> None:
     hints) to return ``[]`` and the status-bar field set to empty (left
     segments) while ``$HC_TERMINAL_ID`` is set. Idempotent, fail-open.
     """
-    global _suppress_active
-    if _suppress_active or layout_mod is None:
+    global _suppress_hints
+    if _suppress_hints or layout_mod is None:
         return
     try:
         import os as _os
@@ -352,7 +353,7 @@ def _suppress_footer_hints(layout_mod) -> None:
         return hints
 
     _wrap(layout_mod, "hint_pairs", hint_factory)
-    _suppress_active = True
+    _suppress_hints = True
 
 
 def _suppress_status_fields(bar_mod) -> None:
@@ -360,8 +361,8 @@ def _suppress_status_fields(bar_mod) -> None:
     both gate on ``field_set is None``, so an empty frozenset blanks them
     (``display.status_bar.fields: []`` is a no-op in the CLI — only a
     non-empty list customizes). Idempotent, fail-open, Herdr-only."""
-    global _suppress_active
-    if _suppress_active or bar_mod is None:
+    global _suppress_fields
+    if _suppress_fields or bar_mod is None:
         return
     try:
         import os as _os
@@ -380,7 +381,7 @@ def _suppress_status_fields(bar_mod) -> None:
     for value in vars(bar_mod).values():
         if isinstance(value, type) and hasattr(value, "_get_status_bar_field_set"):
             _wrap(value, "_get_status_bar_field_set", field_factory)
-            _suppress_active = True
+            _suppress_fields = True
 
 
 def _platform(kwargs: dict) -> str:

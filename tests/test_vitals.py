@@ -205,12 +205,14 @@ class Vitals(unittest.TestCase):
                 return None
 
         class Layout:
-            def hint_pairs(self, cli):
+            @staticmethod
+            def hint_pairs(cli):
                 return [("/", "commands")]
 
         layout, bar = _t.SimpleNamespace(hint_pairs=Layout.hint_pairs), _t.SimpleNamespace(Cli=Cli)
         os.environ["HC_TERMINAL_ID"] = "t0"
-        self.plugin._suppress_active = False
+        setattr(self.plugin, "_suppress_hints", False)
+        setattr(self.plugin, "_suppress_fields", False)
         self.plugin._suppress_footer_hints(layout)
         self.plugin._suppress_status_fields(bar)
         self.assertEqual(layout.hint_pairs(object()), [])
@@ -218,7 +220,7 @@ class Vitals(unittest.TestCase):
 
         # plain terminal: no patch at all
         fresh_layout = _t.SimpleNamespace(hint_pairs=Layout.hint_pairs)
-        self.plugin._suppress_active = False
+        setattr(self.plugin, "_suppress_hints", False)
         del os.environ["HC_TERMINAL_ID"]
         self.plugin._suppress_footer_hints(fresh_layout)
         self.assertEqual(fresh_layout.hint_pairs(object()), [("/", "commands")])
