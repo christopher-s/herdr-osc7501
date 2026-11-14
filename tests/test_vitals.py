@@ -21,7 +21,7 @@ class FakeSnapshotCli:
         self._values = values
         self.calls = 0
 
-    def _get_status_bar_snapshot(self):
+    def _get_status_bar_snapshot(self, *args, **kwargs):
         self.calls += 1
         return dict(self._values)
 
@@ -51,6 +51,7 @@ class Vitals(unittest.TestCase):
         return FakeSnapshotCli(base)
 
     def sample(self, cli):
+        self.plugin._vitals_orig_snapshot[type(cli)] = cli._get_status_bar_snapshot
         return self.plugin._vitals_sample(cli)
 
     def test_no_gate_no_file(self):
@@ -79,9 +80,11 @@ class Vitals(unittest.TestCase):
         os.environ["HC_TERMINAL_ID"] = "t3"
         cli = self.cli()
         first = self.sample(cli)
+        self.assertIsNotNone(first)
         for _ in range(5):
             self.assertIsNone(self.sample(cli))
-        self.assertEqual(cli.calls, 6)
+        # the throttle short-circuits before building: one snapshot build total
+        self.assertEqual(cli.calls, 1)
 
     def test_changed_value_within_window_is_deferred_not_dropped(self):
         os.environ["HC_TERMINAL_ID"] = "t3"
@@ -163,10 +166,13 @@ class Vitals(unittest.TestCase):
 
         Cli._get_status_bar_snapshot = wrapped
         try:
-            self.assertIsNone(plugin._vitals_sample(Cli()))  # hook path: throttle now active
+            c = Cli()
+            c._get_status_bar_snapshot()           # render path: build + write
+            self.assertEqual(build_calls["n"], 1)
+            self.assertIsNone(plugin._vitals_sample(c))  # hook path: throttled, no rebuild
         finally:
             Cli._get_status_bar_snapshot = orig
-        self.assertEqual(build_calls["n"], 1)  # built once, never re-entered
+        self.assertEqual(build_calls["n"], 1)  # built exactly once — never re-entered
 
 
 if __name__ == "__main__":
