@@ -814,4 +814,5 @@ def register(ctx) -> None:
     if _interactive({}) and _foreground_cli():
         _install_exit_clear()
         _install_cli_wrap()
+        _vitals_heartbeat()
         _emit("idle")
