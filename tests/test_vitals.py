@@ -87,7 +87,7 @@ class Vitals(unittest.TestCase):
         os.environ["HC_TERMINAL_ID"] = "t3"
         cli = self.cli()
         self.sample(cli)
-        cli._values["tps"] = 71.5
+        cli._values["avg_velocity"] = 71.5
         # Inside the 500 ms window the write is rate-limited...
         self.assertIsNone(self.sample(cli))
         # ...and lands on the next eligible sample after the window.
@@ -95,7 +95,7 @@ class Vitals(unittest.TestCase):
         os.environ["HC_TERMINAL_ID"] = "t3"
         wrote = self.sample(cli)
         self.assertIsNotNone(wrote)
-        self.assertAlmostEqual(json.loads(Path(wrote).read_text())["tps"], 71.5)
+        self.assertAlmostEqual(json.loads(Path(wrote).read_text())["avg_velocity"], 71.5)
 
     def test_snapshot_failure_writes_nothing(self):
         os.environ["HC_TERMINAL_ID"] = "t4"
@@ -109,11 +109,11 @@ class Vitals(unittest.TestCase):
     def test_partial_snapshot_maps_known_fields_only(self):
         os.environ["HC_TERMINAL_ID"] = "t5"
         cli = self.cli()
-        del cli._values["tps"]
-        del cli._values["cache_hit"]
+        del cli._values["avg_velocity"]
+        del cli._values["cache_hit_pct"]
         wrote = self.sample(cli)
         data = json.loads(Path(wrote).read_text())
-        self.assertNotIn("tps", data)
+        self.assertNotIn("avg_velocity", data)
         self.assertAlmostEqual(data["context_pct"], 23.0)
 
     def test_exit_cleans_own_file(self):
