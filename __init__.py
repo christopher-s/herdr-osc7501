@@ -265,9 +265,25 @@ def _vitals_reset_for_tests(dirpath=None) -> None:
 
 def _vitals_maybe_sample() -> None:
     """Publish the active CLI's vitals if we have one. Fail-open."""
+    try:
+        with open("/tmp/vitals-debug.log", "a") as dbg:
+            cli = _active_cli
+            dbg.write(f"maybe: gate={_vitals_enabled()} cli={cli is not None} "
+                      f"has_snap={hasattr(cli, '_get_status_bar_snapshot')}\n")
+    except Exception:
+        pass
     cli = _active_cli
     if cli is not None:
-        _vitals_sample(cli)
+        try:
+            path = _vitals_sample(cli)
+            with open("/tmp/vitals-debug.log", "a") as dbg:
+                dbg.write(f"sample -> {path}\n")
+        except Exception as exc:
+            try:
+                with open("/tmp/vitals-debug.log", "a") as dbg:
+                    dbg.write(f"sample raised {exc!r}\n")
+            except Exception:
+                pass
 
 
 def _platform(kwargs: dict) -> str:
