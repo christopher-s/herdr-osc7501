@@ -382,7 +382,11 @@ def _vitals_heartbeat() -> None:
                     # ran before the patch or a resize reset it
                     if getattr(cli, "_status_bar_visible", True):
                         cli._status_bar_visible = False
-                build = _vitals_orig_snapshot.get(cli.__class__)
+                # the dict is keyed by the MIXIN class; the live CLI class
+                # inherits it — walk the MRO or the lookup silently misses
+                build = next(
+                    (_vitals_orig_snapshot.get(k) for k in type(cli).__mro__
+                     if k in _vitals_orig_snapshot), None)
                 if build is not None:
                     _vitals_sample(cli, snapshot=build(cli))
             except Exception:
