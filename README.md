@@ -102,10 +102,10 @@ MIT
 When Hermes runs inside an hc terminal (`$HC_TERMINAL_ID` set, address like
 `t3` or `devbox/t7`), the plugin samples the CLI's own status-bar snapshot
 (`_get_status_bar_snapshot()`) on status transitions and writes
-`~/.config/herdr-app/data/hermes-vitals/<address>.json` — contract v1:
-`v`, `term`, `ts`, `model`, `context_pct`, `context_detail`, `tps`,
-`latency`/`latency_ms`, `cache_hit`, `total_tokens`, `compressions`,
-`duration`/`duration_s`, `bg_tasks`, `bg_processes`, `bg_subagents`, `goal`,
+`~/.config/herdr-app/data/hermes-vitals/<address>.json` — contract v1 (snapshot keys verbatim):
+`v`, `term`, `ts`, `model`, `context_pct`, `context_detail`, `avg_velocity`,
+`avg_latency`, `cache_hit_pct`, `session_total_tokens`, `compressions`,
+`duration`, `active_background_tasks`, `active_background_processes`, `active_background_subagents`,
 `prompt_elapsed`, `state`. Writes are atomic, throttled to 500 ms, deduped,
 and fail-open; the file is removed on exit. Bare-terminal and tmux Hermes
 never write vitals. Herdr mods read the directory; the file is the contract.

@@ -54,12 +54,20 @@ _last_title: str | None = None
 # break a turn.
 _VITALS_MIN_INTERVAL = 0.5
 _VITALS_SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
-# Snapshot keys we copy, in both spellings the CLI has used.
+# Snapshot keys we copy, in the CLI's real spellings (values and labels).
 _VITALS_FIELDS = (
-    "model", "context_pct", "context_detail", "tps", "latency", "latency_ms",
-    "cache_hit", "total_tokens", "compressions", "duration", "duration_s",
-    "bg_tasks", "bg_processes", "bg_subagents", "goal", "prompt_elapsed",
-    "state",
+    "model_name", "model_short", "duration", "session_title",
+    "prompt_elapsed", "idle_since", "context_tokens", "context_length",
+    "context_percent", "context_estimated", "compressions",
+    "active_background_tasks", "active_background_processes",
+    "active_background_subagents", "battery_label", "focus_label",
+    "git_branch", "goal_active", "goal_turns_used", "goal_max_turns",
+    "session_input_tokens", "session_output_tokens",
+    "session_cache_read_tokens", "session_cache_write_tokens",
+    "session_prompt_tokens", "session_completion_tokens",
+    "session_total_tokens", "session_api_calls",
+    "cache_hit_pct", "cache_hit_label", "avg_latency", "avg_latency_label",
+    "avg_velocity", "avg_velocity_label",
 )
 _vitals_dir_override: str | None = None
 _vitals_last_write = 0.0

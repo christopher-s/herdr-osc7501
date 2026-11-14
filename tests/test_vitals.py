@@ -40,9 +40,12 @@ class Vitals(unittest.TestCase):
 
     def cli(self, **values):
         base = {
-            "model": "glm-5.3", "context_pct": 23.0, "tps": 54.2,
-            "latency_ms": 412, "cache_hit": 91.0, "total_tokens": 184000,
-            "compressions": 1, "duration_s": 133.0, "state": "working",
+            "model_name": "zai/glm-5.3", "model_short": "glm-5.3",
+            "context_percent": 23.0, "context_tokens": 184000,
+            "context_length": 1000000, "avg_velocity": 54.2,
+            "avg_latency": 412.0, "cache_hit_pct": 91.0,
+            "session_total_tokens": 184000, "compressions": 1,
+            "duration": "2m 13s",
         }
         base.update(values)
         return FakeSnapshotCli(base)
@@ -62,9 +65,9 @@ class Vitals(unittest.TestCase):
         data = json.loads(Path(wrote).read_text())
         self.assertEqual(data["v"], 1)
         self.assertEqual(data["term"], "t9")
-        self.assertEqual(data["model"], "glm-5.3")
-        self.assertAlmostEqual(data["context_pct"], 23.0)
-        self.assertEqual(data["state"], "working")
+        self.assertEqual(data["model_name"], "zai/glm-5.3")
+        self.assertAlmostEqual(data["context_percent"], 23.0)
+        self.assertNotIn("state", data)
         self.assertIn("ts", data)
 
     def test_machine_qualified_address_kept_verbatim(self):
