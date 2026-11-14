@@ -9,9 +9,24 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
+import types
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _Modal:
+    def __init__(self, release=None):
+        self._release = release
+    def _approval_callback(self, command, description, **kwargs):
+        if self._release is not None:
+            self._release()
+        return "once"
+    def _clarify_callback(self, questions):
+        return {"answers": {}, "outcome": "submitted"}
+    def _sudo_password_callback(self):
+        return ""
 
 
 def hc(*args):
@@ -41,10 +56,27 @@ def child():
     cli._session_db = SimpleNamespace(connection=connection)
     connection.state("smoke").adopt_snapshot({"info": {"title": "Winston · 日本語 🐾"}})
     plugin._emit("idle")
+    import threading
+    release = threading.Event()
     print("READY", flush=True)
+
+    class _HoldingModal(_Modal):
+        def _approval_callback(self, command, description, **kwargs):
+            release.wait(timeout=30)
+            return "once"
+
     for command in sys.stdin:
         if command.strip() == "rename":
             connection.state(cli.session_id).apply_event("session.updated", {"title": "Renamed conversation"})
+        elif command.strip() == "block":
+            import types as _types
+            plugin._wrap_modals(_types.SimpleNamespace(Modal=_HoldingModal))
+            threading.Thread(target=_HoldingModal()._approval_callback,
+                             args=("rm -rf /tmp/herdr-smoke", "Remove smoke scratch"), daemon=True).start()
+        elif command.strip() == "release":
+            release.set()
+        elif command.strip() == "done":
+            plugin._finish_from_result({"final_response": "Migration finished. Rows copied: 42\nMore detail."})
         elif command.strip() == "clear":
             plugin._force_clear()
         elif command.strip() == "exit":
@@ -59,15 +91,40 @@ def main():
                       "--cwd", str(ROOT), sys.executable, str(Path(__file__).resolve()), "--child")
         address = launched["address"]
         hc("wait", address, "--output", "READY", "--timeout", "15")
-        for expected, command in [("Winston · 日本語 🐾", None),
-                                  ("Renamed conversation", "rename"), ("", "clear")]:
+        steps = [("Winston · 日本語 🐾", None, None),
+                 ("Renamed conversation", "rename", None),
+                 ("Renamed conversation", "block", "rm -rf /tmp/herdr-smoke"),
+                 ("Renamed conversation", "release", None),
+                 ("Renamed conversation", "done", None),
+                 ("", "clear", None)]
+        for expected, command, blocked_msg in steps:
             if command:
-                hc("send", address, command)
+                # A blocked program still reads its own stdin through this harness.
+                hc("send", *(["--force"] if command == "release" else []), address, command)
             actual = hc("get", address)
             assert actual["title"] == expected, actual
-            if command != "clear":
-                assert actual["status"]["app"] == "hermes", actual
-            print(json.dumps({"terminal": address, "title": actual["title"], "verified": True}, ensure_ascii=False))
+            status = actual["status"] or {}
+            if blocked_msg:
+                assert status.get("state") == "blocked", actual
+                assert status.get("msg") == blocked_msg, actual
+            if command == "release":
+                for _ in range(40):
+                    actual = hc("get", address)
+                    status = actual["status"] or {}
+                    if status.get("state") == "working":
+                        break
+                    time.sleep(0.25)
+                assert status.get("state") == "working", actual
+            if command == "done":
+                assert status.get("state") == "done", actual
+                assert status.get("msg") == "Migration finished. Rows copied: 42", actual
+            if command == "clear":
+                assert actual["status"] is None, actual
+                assert actual["title"] == "", actual
+            elif actual["status"] is not None:
+                assert status.get("app") == "hermes", actual
+            print(json.dumps({"terminal": address, "title": actual["title"],
+                              "msg": status.get("msg"), "verified": True}, ensure_ascii=False))
     finally:
         if address:
             hc("kill", address)

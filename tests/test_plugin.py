@@ -228,6 +228,7 @@ print("startup wrappers installed")
             b"\x1b]7501;state=blocked:app=hermes:kind=question:msg=V2FpdGluZyBmb3IgYW4gYW5zd2Vy\x1b\\",
             b"\x1b]7501;state=done:app=hermes\x1b\\"])
 
+
     def test_short_terminal_writes_complete_the_payload(self):
         accepted = bytearray()
         def short_write(fd, data):
@@ -258,3 +259,112 @@ print("startup wrappers installed")
 
 if __name__ == "__main__":
     unittest.main()
+class Messages(unittest.TestCase):
+    def setUp(self):
+        self.plugin = load_plugin()
+        self.output = []
+        self.writer = patch.object(self.plugin, "_write", side_effect=self.capture)
+        self.writer.start()
+        self.addCleanup(self.writer.stop)
+
+    def capture(self, data):
+        self.output.append(data)
+        return True
+
+    def reports(self):
+        return [r for r in self.output if r.startswith(b"\x1b]7501;")]
+
+    @staticmethod
+    def msg_of(report):
+        text = report.decode("ascii")
+        for part in text.split(":"):
+            if part.startswith("msg="):
+                import base64
+                return base64.b64decode(part[4:]).decode("utf-8")
+        return None
+
+    @staticmethod
+    def modal():
+        """A class carrying all three modal methods, as wrapper discovery requires."""
+        class Modal:
+            def _approval_callback(self, command, description, **kwargs):
+                return "once"
+            def _clarify_callback(self, questions):
+                return {"answers": {}, "outcome": "submitted"}
+            def _sudo_password_callback(self):
+                return ""
+        return Modal()
+
+    def test_approval_block_carries_command(self):
+        modal = self.modal()
+        self.plugin._wrap_modals(types.SimpleNamespace(Modal=type(modal)))
+        modal._approval_callback("rm -rf /tmp/x", "Remove scratch")
+        blocked = [r for r in self.reports() if b"state=blocked" in r]
+        self.assertEqual(len(blocked), 1)
+        self.assertIn("kind=permission", blocked[0].decode())
+        self.assertEqual(self.msg_of(blocked[0]), "rm -rf /tmp/x")
+
+    def test_approval_block_prefers_short_description(self):
+        modal = self.modal()
+        self.plugin._wrap_modals(types.SimpleNamespace(Modal=type(modal)))
+        modal._approval_callback("x" * 120, "Install dependencies")
+        blocked = [r for r in self.reports() if b"state=blocked" in r]
+        self.assertEqual(self.msg_of(blocked[0]), "Install dependencies")
+
+    def test_clarify_block_carries_first_question(self):
+        modal = self.modal()
+        self.plugin._wrap_modals(types.SimpleNamespace(Modal=type(modal)))
+        modal._clarify_callback([
+            {"qid": "q0", "question": "Which database?", "choices": ["postgres", "sqlite"]},
+            {"qid": "q1", "question": "And region?", "choices": None}])
+        blocked = [r for r in self.reports() if b"state=blocked" in r]
+        self.assertIn("kind=question", blocked[0].decode())
+        self.assertEqual(self.msg_of(blocked[0]), "Which database?")
+
+    def test_blocked_message_falls_back_when_payload_is_unusable(self):
+        class Modal:
+            def _approval_callback(self, command="", description="", **kwargs):
+                return "once"
+        self.plugin._wrap_modals(types.SimpleNamespace(Modal=Modal))
+        Modal()._approval_callback("", "  ")
+        blocked = [r for r in self.reports() if b"state=blocked" in r]
+        self.assertEqual(self.msg_of(blocked[0]), "Waiting for approval")
+
+    def test_block_clears_message_when_work_resumes(self):
+        class Modal:
+            def _approval_callback(self, command, description, **kwargs):
+                return "once"
+        self.plugin._wrap_modals(types.SimpleNamespace(Modal=Modal))
+        Modal()._approval_callback("npm install", "Install")
+        self.plugin._emit("working")
+        working = [r for r in self.reports() if b"state=working" in r][-1]
+        self.assertNotIn(b"msg=", working)
+
+    def test_done_carries_reply_headline(self):
+        self.plugin._finish_from_result({"final_response": "All 22 tests passed.\nDetails attached."})
+        done = [r for r in self.reports() if b"state=done" in r]
+        self.assertEqual(len(done), 1)
+        self.assertEqual(self.msg_of(done[0]), "All 22 tests passed.")
+
+    def test_done_headline_sanitized_and_bounded(self):
+        self.plugin._finish_from_result({"final_response": "  \x1b[31mDeploy" + " ok" * 200 + "\x1b[0m\nline two"})
+        done = [r for r in self.reports() if b"state=done" in r]
+        self.assertEqual(self.msg_of(done[0]), ("Deploy" + " ok" * 200)[:120].strip())
+
+    def test_done_without_usable_text_omits_msg(self):
+        self.plugin._finish_from_result({"final_response": "   \n\t"})
+        done = [r for r in self.reports() if b"state=done" in r]
+        self.assertEqual(done, [b"\x1b]7501;state=done:app=hermes\x1b\\"])
+
+    def test_failed_and_interrupted_omit_headline(self):
+        self.plugin._finish_from_result({"failed": True, "final_response": "boom"})
+        self.plugin._finish_from_result({"interrupted": True, "final_response": "halted"})
+        self.assertEqual([r for r in self.reports() if b"state=done" in r], [])
+
+    def test_hook_path_blocked_and_done_messages(self):
+        self.plugin._on_blocked(kind="approval", platform="cli", summary="Rebuild the index?")
+        blocked = [r for r in self.reports() if b"state=blocked" in r]
+        self.assertEqual(self.msg_of(blocked[-1]), "Rebuild the index?")
+        self.plugin._on_turn_end(platform="cli", response="Migration finished. Rows copied: 42")
+        done = [r for r in self.reports() if b"state=done" in r]
+        self.assertEqual(self.msg_of(done[-1]), "Migration finished. Rows copied: 42")

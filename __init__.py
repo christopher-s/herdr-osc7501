@@ -34,8 +34,12 @@ _MSG = {
     "question": "Waiting for an answer",
     "auth": "Waiting to sign in",
 }
+# Longer approval commands read better as their human description; the CLI
+# itself switches to a "view" choice at 70 characters.
+_LONG_COMMAND = 70
+_MSG_LIMIT = 120
 _WRAP = "_herdr_osc7501"
-_last: tuple[str, str] | None = None
+_last: tuple[str, str, str] | None = None
 _title_lock = threading.RLock()
 _active_state = None
 _active_cli = None
@@ -55,6 +59,18 @@ def _title_text(title) -> str:
     text = "".join(" " if c.isspace() else c for c in text
                    if c.isspace() or unicodedata.category(c) not in {"Cc", "Cf", "Cs"})
     return " ".join(text.split())[:256] or "Hermes"
+
+
+def _message_text(text, limit=_MSG_LIMIT) -> str | None:
+    """First sanitized line of ``text`` for msg=, or None when nothing usable remains."""
+    if not isinstance(text, str):
+        return None
+    stripped = _TERMINAL_ESCAPE.sub("", text)
+    line = next((part for part in stripped.splitlines() if part.strip()), "")
+    line = "".join(" " if c.isspace() else c for c in line
+                   if c.isspace() or unicodedata.category(c) not in {"Cc", "Cf", "Cs"})
+    line = " ".join(line.split())
+    return line[:limit] or None
 
 
 def _emit_title(title: str) -> None:
@@ -213,7 +229,7 @@ def _write(payload: bytes) -> bool:
 
 def _emit(state: str, *, kind: str | None = None, msg: str | None = None) -> None:
     global _last
-    key = (state, kind or "")
+    key = (state, kind or "", msg or "")
     if key == _last:
         return
     if _write(sequence(state, kind=kind, msg=msg).encode("ascii")):
@@ -290,12 +306,13 @@ def _on_turn_end(**kwargs) -> None:
     elif kwargs.get("failed"):
         _report("error", kwargs)
     else:
-        _report("done", kwargs)
+        _report("done", kwargs, msg=_message_text(kwargs.get("response")))
 
 
 def _on_blocked(**kwargs) -> None:
     kind = _KIND.get(str(kwargs.get("kind") or "permission"), "permission")
-    _report("blocked", kwargs, kind=kind, msg=_MSG.get(kind))
+    _report("blocked", kwargs, kind=kind,
+            msg=_message_text(kwargs.get("summary")) or _MSG.get(kind))
 
 
 def _finish_from_result(result) -> None:
@@ -305,11 +322,14 @@ def _finish_from_result(result) -> None:
     if result.get("interrupted"):
         _emit("idle")
     elif result.get("failed"):
-        _emit("error")
+        _emit("error", msg=_message_text(result.get("error")))
     elif result.get("admitted") is False:
         _emit("idle")
     else:
-        _emit("done")
+        reply = result.get("pre_transform_response") if result.get("response_transformed") else None
+        if not isinstance(reply, str):
+            reply = result.get("final_response")
+        _emit("done", msg=_message_text(reply))
 
 
 def _wrap(obj, name: str, factory) -> None:
@@ -369,20 +389,44 @@ def _wrap_modals(mod) -> None:
     if cls is None:
         return
 
-    def blocking(kind):
-        def factory(orig):
-            def method(self, *args, **kwargs):
-                _emit("blocked", kind=kind, msg=_MSG.get(kind))
-                try:
-                    return orig(self, *args, **kwargs)
-                finally:
-                    _emit("working")
-            return method
-        return factory
+    def approval_factory(orig):
+        def method(self, command="", description="", **kwargs):
+            # A long command reads as its human description; the CLI itself
+            # switches to a "view" choice at 70 characters.
+            text = command if len(str(command)) <= _LONG_COMMAND else description
+            _emit("blocked", kind="permission", msg=_message_text(text) or _MSG["permission"])
+            try:
+                return orig(self, command, description, **kwargs)
+            finally:
+                _emit("working")
+        return method
 
-    _wrap(cls, "_approval_callback", blocking("permission"))
-    _wrap(cls, "_clarify_callback", blocking("question"))
-    _wrap(cls, "_sudo_password_callback", blocking("auth"))
+    def clarify_factory(orig):
+        def method(self, questions=(), **kwargs):
+            first = ""
+            for question in questions or ():
+                if isinstance(question, dict) and question.get("question"):
+                    first = str(question["question"])
+                    break
+            _emit("blocked", kind="question", msg=_message_text(first) or _MSG["question"])
+            try:
+                return orig(self, questions, **kwargs)
+            finally:
+                _emit("working")
+        return method
+
+    def auth_factory(orig):
+        def method(self, *args, **kwargs):
+            _emit("blocked", kind="auth", msg=_MSG["auth"])
+            try:
+                return orig(self, *args, **kwargs)
+            finally:
+                _emit("working")
+        return method
+
+    _wrap(cls, "_approval_callback", approval_factory)
+    _wrap(cls, "_clarify_callback", clarify_factory)
+    _wrap(cls, "_sudo_password_callback", auth_factory)
 
 
 def _install_cli_wrap() -> None:
