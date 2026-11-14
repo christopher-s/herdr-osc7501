@@ -140,6 +140,34 @@ class Vitals(unittest.TestCase):
         self.assertEqual(leftovers, [])
         json.loads(Path(wrote).read_text())
 
+    def test_render_wrap_passes_snapshot_without_reentering(self):
+        """The render wrap must reuse its result, never call the wrapped
+        method again (the keystroke-lag recursion bug, 2026-11-14)."""
+        os.environ["HC_TERMINAL_ID"] = "t8"
+        build_calls = {"n": 0}
+
+        class Cli:
+            def _get_status_bar_snapshot(self):
+                build_calls["n"] += 1
+                return {"model_short": "probe", "duration": "1s"}
+
+        orig = Cli._get_status_bar_snapshot
+        plugin = self.plugin
+
+        def wrapped(self):
+            result = orig(self)
+            setattr(plugin, "_active_cli", self)
+            w = plugin._vitals_sample(self, snapshot=result)
+            self.assertIsNotNone(w)
+            return result
+
+        Cli._get_status_bar_snapshot = wrapped
+        try:
+            self.assertIsNone(plugin._vitals_sample(Cli()))  # hook path: throttle now active
+        finally:
+            Cli._get_status_bar_snapshot = orig
+        self.assertEqual(build_calls["n"], 1)  # built once, never re-entered
+
 
 if __name__ == "__main__":
     unittest.main()

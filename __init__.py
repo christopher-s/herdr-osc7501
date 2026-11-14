@@ -73,6 +73,8 @@ _vitals_dir_override: str | None = None
 _vitals_last_write = 0.0
 _vitals_last_payload: dict | None = None
 _vitals_own_path: str | None = None
+_vitals_orig_snapshot: dict = {}
+_vitals_in_sample = False
 # Remove complete CSI and OSC/DCS strings before stripping individual controls.
 _TERMINAL_ESCAPE = re.compile(
     r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
@@ -223,16 +225,29 @@ def _vitals_write(payload: dict) -> str | None:
         return None
 
 
-def _vitals_sample(cli) -> str | None:
-    """Read the CLI's own status snapshot; write when values changed."""
+def _vitals_sample(cli, snapshot=None) -> str | None:
+    """Read the CLI's own status snapshot; write when values changed.
+
+    ``snapshot`` is the already-built dict when called from the render wrap;
+    callers without one (hook path) supply None and we build it via the
+    captured original — never the wrapped method, or we would recurse.
+    Cheap path first: inside the throttle window with a known payload, no
+    work at all.
+    """
     global _vitals_last_write, _vitals_last_payload
     if not _vitals_enabled():
         return None
     now = time.monotonic()
-    try:
-        snapshot = cli._get_status_bar_snapshot()
-    except Exception:
+    if _vitals_last_payload is not None and now - _vitals_last_write < _VITALS_MIN_INTERVAL:
         return None
+    if snapshot is None:
+        build = _vitals_orig_snapshot.get(cli.__class__)
+        if build is None:
+            return None
+        try:
+            snapshot = build(cli)
+        except Exception:
+            return None
     if not isinstance(snapshot, dict):
         return None
     payload = {"v": 1, "term": os.environ["HC_TERMINAL_ID"], "ts": time.time()}
@@ -241,8 +256,6 @@ def _vitals_sample(cli) -> str | None:
         if value is not None:
             payload[key] = value
     if _vitals_last_payload is not None and payload == _vitals_last_payload:
-        return None
-    if now - _vitals_last_write < _VITALS_MIN_INTERVAL and _vitals_last_payload is not None:
         return None
     path = _vitals_write(payload)
     if path is not None:
@@ -265,20 +278,13 @@ def _vitals_cleanup() -> None:
 def _vitals_reset_for_tests(dirpath=None) -> None:
     """Fresh module state, optional directory override; tests only."""
     global _vitals_dir_override, _vitals_last_write, _vitals_last_payload, _vitals_own_path
+    global _vitals_orig_snapshot, _vitals_in_sample
     _vitals_dir_override = str(dirpath) if dirpath is not None else None
     _vitals_last_write = 0.0
     _vitals_last_payload = None
     _vitals_own_path = None
-
-
-def _vitals_maybe_sample() -> None:
-    """Publish the active CLI's vitals if we have one. Fail-open."""
-    cli = _active_cli
-    if cli is not None:
-        try:
-            _vitals_sample(cli)
-        except Exception:
-            pass
+    _vitals_orig_snapshot = {}
+    _vitals_in_sample = False
 
 
 def _wrap_status_bar(mod) -> None:
@@ -286,8 +292,11 @@ def _wrap_status_bar(mod) -> None:
 
     The CLI calls ``_get_status_bar_snapshot`` for every status-bar frame;
     wrapping it captures ``self`` on first render with no timing assumptions
-    and samples at exactly the cadence the visible bar shows. Idempotent.
+    and samples at exactly the cadence the visible bar shows. The original
+    is remembered per class so the hook path can build a snapshot without
+    re-entering this wrap. Idempotent; the sample is re-entrancy guarded.
     """
+    global _vitals_in_sample
     mixin_cls = None
     for value in vars(mod).values():
         if isinstance(value, type) and hasattr(value, "_get_status_bar_snapshot"):
@@ -296,15 +305,22 @@ def _wrap_status_bar(mod) -> None:
     if mixin_cls is None:
         return
 
+    orig = getattr(mixin_cls, "_get_status_bar_snapshot")
+    _vitals_orig_snapshot[mixin_cls] = orig
+
     def factory(orig):
         def snapshot(self, *args, **kwargs):
             result = orig(self, *args, **kwargs)
             global _active_cli
             _active_cli = self
-            try:
-                _vitals_sample(self)
-            except Exception:
-                pass
+            if not _vitals_in_sample:
+                _vitals_in_sample = True
+                try:
+                    _vitals_sample(self, snapshot=result)
+                except Exception:
+                    pass
+                finally:
+                    _vitals_in_sample = False
             return result
         return snapshot
 
@@ -386,7 +402,6 @@ def _emit(state: str, *, kind: str | None = None, msg: str | None = None) -> Non
         return
     if _write(sequence(state, kind=kind, msg=msg).encode("ascii")):
         _last = key
-        _vitals_maybe_sample()
 
 
 def _force_clear() -> None:
