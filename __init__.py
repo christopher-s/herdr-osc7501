@@ -391,6 +391,7 @@ def _vitals_heartbeat() -> None:
                     _vitals_sample(cli, snapshot=build(cli))
                 try:
                     _subagents_sample()
+                    _subagents_click_sample()
                 except Exception:
                     pass
             except Exception:
@@ -414,6 +415,10 @@ _subagents_last_write = 0.0
 _subagents_last_payload: dict | None = None
 _subagents_own_path: str | None = None
 _subagents_diag_written: str | None = None
+_subagents_live_source = None
+_subagents_click_last_poll = 0.0
+_subagents_click_seen = None
+_subagents_click_lock = threading.Lock()
 
 
 def _subagents_dir() -> str:
@@ -478,6 +483,7 @@ def _subagents_write(path: str, payload: dict) -> None:
 
 def _subagents_sample() -> str | None:
     global _subagents_last_write, _subagents_last_payload, _subagents_own_path
+    global _subagents_live_source
     if not _vitals_enabled():
         return None
     now = time.monotonic()
@@ -493,10 +499,12 @@ def _subagents_sample() -> str | None:
         _subagents_diag(repr(exc))
         return None
     children = [_roster_child(r) for r in (rows or []) if isinstance(r, dict)]
+    _subagents_live_source = source  # LocalSubagents keeps transcript paths from this read.
     path = os.path.join(_subagents_dir(), f"{os.environ['HC_TERMINAL_ID']}.json")
     payload = {"v": 1, "term": os.environ["HC_TERMINAL_ID"], "ts": time.time(),
                "children": children}
     if not children:
+        _subagents_cleanup()
         # active-only rule: an empty roster removes the file; never write an empty one
         if _subagents_last_payload is not None and _subagents_last_payload.get("children"):
             try:
@@ -522,11 +530,71 @@ def _subagents_sample() -> str | None:
     return path
 
 
+def _subagents_click_sample() -> str | None:
+    """One bounded tail per new click, at most once a second while live.
+
+    Runs on the existing heartbeat. request_ts correlates the asynchronous
+    reply so a popup cannot consume an earlier click's transcript.
+    """
+    global _subagents_click_last_poll, _subagents_click_seen
+    if not _vitals_enabled() or not _subagents_own_path:
+        return None
+    if not _subagents_click_lock.acquire(blocking=False):
+        return None
+    try:
+        now = time.monotonic()
+        if now - _subagents_click_last_poll < 1:
+            return None
+        if not os.path.isfile(_subagents_own_path):
+            return None
+        _subagents_click_last_poll = now
+        term = os.environ["HC_TERMINAL_ID"]
+        base = os.path.join(_subagents_dir(), term)
+        with open(base + ".click.json", encoding="utf-8") as fh:
+            click = json.loads(fh.read(4096))
+        if not isinstance(click, dict) or click.get("v") != 1:
+            return None
+        child, ts = click.get("child"), click.get("ts")
+        if (not isinstance(child, str) or not isinstance(ts, (int, float))
+                or isinstance(ts, bool) or not 0 <= time.time() - ts <= 10):
+            return None
+        key = (child, ts)
+        if key == _subagents_click_seen:
+            return None
+        if child not in {c["id"] for c in (_subagents_last_payload or {}).get("children", [])}:
+            return None
+        _subagents_click_seen = key  # failures are deduped and rate-limited too
+        source = _subagents_live_source
+        if source is None:
+            return None
+        text = source.subagent_tail(child, fetch=True)
+        if not isinstance(text, str):
+            return None
+        lines = [_message_text(line, limit=240) for line in text[-16384:].splitlines()]
+        lines = [line for line in lines if line][-8:]
+        # A concurrent empty-roster update must never resurrect a tail.
+        if not _subagents_own_path or not os.path.isfile(_subagents_own_path):
+            return None
+        path = base + ".tail.json"
+        _subagents_write(path, {"v": 1, "term": term, "child": child,
+                                "ts": time.time(), "request_ts": ts, "lines": lines})
+        return path
+    except Exception:
+        return None
+    finally:
+        _subagents_click_lock.release()
+
+
 def _subagents_cleanup() -> None:
-    """Remove our own roster file; never raises."""
-    global _subagents_own_path
+    """Remove only this terminal's roster and click/tail files; never raises."""
+    global _subagents_own_path, _subagents_click_seen
     path, _subagents_own_path = _subagents_own_path, None
-    if path:
+    _subagents_click_seen = None
+    paths = [path] if path else []
+    if _vitals_enabled():
+        base = os.path.join(_subagents_dir(), os.environ["HC_TERMINAL_ID"])
+        paths.extend([base + ".click.json", base + ".tail.json"])
+    for path in paths:
         try:
             os.unlink(path)
         except Exception:
@@ -537,11 +605,15 @@ def _subagents_reset_for_tests(dirpath=None) -> None:
     """Fresh module state, optional directory override; tests only."""
     global _subagents_dir_override, _subagents_last_write, _subagents_last_payload
     global _subagents_own_path, _subagents_diag_written
+    global _subagents_live_source, _subagents_click_last_poll, _subagents_click_seen
     _subagents_dir_override = str(dirpath) if dirpath is not None else None
     _subagents_last_write = 0.0
     _subagents_last_payload = None
     _subagents_own_path = None
     _subagents_diag_written = None
+    _subagents_live_source = None
+    _subagents_click_last_poll = 0.0
+    _subagents_click_seen = None
 
 
 def _suppress_status_bar_window(cli_mod) -> None:

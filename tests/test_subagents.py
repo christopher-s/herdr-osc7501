@@ -188,6 +188,95 @@ class Subagents(unittest.TestCase):
         self.assertEqual(leftovers, [])
         json.loads(Path(wrote).read_text())
 
+    def click(self, child="sa-3-9f2c", ts=None):
+        path = Path(self.tmp.name) / "t9.click.json"
+        path.write_text(json.dumps({"v": 1, "child": child, "ts": ts or time.time()}))
+        return path
+
+    def tail_fixture(self, text="First line\nLatest activity"):
+        self.gate()
+        stub = self.source([row()])
+        stub.tail_calls = []
+        def tail(child, *, fetch=False):
+            stub.tail_calls.append((child, fetch))
+            if isinstance(text, Exception):
+                raise text
+            return text
+        stub.subagent_tail = tail
+        self.plugin._subagents_sample()
+        return stub
+
+    def test_click_fetches_own_live_child_once_and_writes_bounded_tail(self):
+        stub = self.tail_fixture("\x1b[31mred\x1b[0m\n" + "\n".join("x" * 400 for _ in range(12)))
+        click = self.click()
+        request = json.loads(click.read_text())
+        path = self.plugin._subagents_click_sample()
+        data = json.loads(Path(path).read_text())
+        self.assertEqual(data["term"], "t9")
+        self.assertEqual(data["child"], "sa-3-9f2c")
+        self.assertEqual(data["request_ts"], request["ts"])
+        self.assertEqual(len(data["lines"]), 8)
+        self.assertTrue(all(len(line) <= 240 for line in data["lines"]))
+        self.assertNotIn("\x1b", json.dumps(data["lines"]))
+        with patch.object(self.plugin.time, "monotonic", return_value=time.monotonic() + 2):
+            self.assertIsNone(self.plugin._subagents_click_sample())
+        self.assertEqual(stub.tail_calls, [("sa-3-9f2c", True)])
+
+    def test_click_rate_limit_defers_new_request(self):
+        stub = self.tail_fixture()
+        self.click(ts=1000)
+        with patch.object(self.plugin.time, "time", return_value=1000), patch.object(self.plugin.time, "monotonic", return_value=10):
+            self.plugin._subagents_click_sample()
+            self.click(ts=1000.1)
+            self.assertIsNone(self.plugin._subagents_click_sample())
+        with patch.object(self.plugin.time, "time", return_value=1001), patch.object(self.plugin.time, "monotonic", return_value=11):
+            self.assertIsNotNone(self.plugin._subagents_click_sample())
+        self.assertEqual(len(stub.tail_calls), 2)
+
+    def test_click_invalid_foreign_stale_or_future_requests_do_not_fetch(self):
+        stub = self.tail_fixture()
+        for value in ["{bad", {"v": 2, "child": "sa-3-9f2c", "ts": time.time()},
+                      {"v": 1, "child": "foreign", "ts": time.time()},
+                      {"v": 1, "child": "sa-3-9f2c", "ts": time.time() - 30},
+                      {"v": 1, "child": "sa-3-9f2c", "ts": time.time() + 30}]:
+            (Path(self.tmp.name) / "t9.click.json").write_text(value if isinstance(value, str) else json.dumps(value))
+            self.plugin._subagents_click_last_poll = 0
+            self.assertIsNone(self.plugin._subagents_click_sample())
+        self.assertEqual(stub.tail_calls, [])
+
+    def test_click_no_roster_or_no_gate_performs_no_io(self):
+        self.tail_fixture()
+        self.click()
+        (Path(self.tmp.name) / "t9.json").unlink()
+        with patch("builtins.open", side_effect=AssertionError("must not read click")):
+            self.assertIsNone(self.plugin._subagents_click_sample())
+        os.environ.pop("HC_TERMINAL_ID")
+        with patch("builtins.open", side_effect=AssertionError("gate must not read")):
+            self.assertIsNone(self.plugin._subagents_click_sample())
+
+    def test_empty_roster_clears_tail_and_click(self):
+        stub = self.tail_fixture()
+        click = self.click()
+        tail = Path(self.plugin._subagents_click_sample())
+        stub.rows = []
+        with patch.object(self.plugin.time, "monotonic", return_value=time.monotonic() + 2):
+            self.plugin._subagents_sample()
+        self.assertFalse(tail.exists())
+        self.assertFalse(click.exists())
+        self.assertIsNone(self.plugin._subagents_click_sample())
+
+    def test_tail_failure_is_fail_open_and_cleanup_only_own_files(self):
+        stub = self.tail_fixture(RuntimeError("unavailable"))
+        self.click()
+        self.assertIsNone(self.plugin._subagents_click_sample())
+        self.assertFalse((Path(self.tmp.name) / "t9.tail.json").exists())
+        foreign = Path(self.tmp.name) / "t8.tail.json"
+        foreign.write_text("{}")
+        self.plugin._subagents_cleanup()
+        self.assertFalse((Path(self.tmp.name) / "t9.click.json").exists())
+        self.assertTrue(foreign.exists())
+        self.assertEqual(len(stub.tail_calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
