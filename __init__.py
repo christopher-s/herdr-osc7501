@@ -389,12 +389,137 @@ def _vitals_heartbeat() -> None:
                      if k in _vitals_orig_snapshot), None)
                 if build is not None:
                     _vitals_sample(cli, snapshot=build(cli))
+                try:
+                    _subagents_sample()
+                except Exception:
+                    pass
             except Exception:
                 pass
 
     t = threading.Thread(target=run, name="herdr-vitals-heartbeat", daemon=True)
     t.start()
     _vitals_thread = t
+
+
+# --- Subagent roster sidecar (contract v1) ----------------------------------
+# One JSON file per hc terminal under ~/.config/herdr-app/data/hermes-subagents/,
+# named by $HC_TERMINAL_ID, holding only the LIVE children (active-only rule:
+# an empty roster removes the file). Source: the same registry backend the CLI
+# monitor and dock consult — the gateway session view when its children run
+# there, else this process's own registry. Gated (same rule as vitals),
+# throttled, fail-open: nothing here may ever break a turn.
+_SUBAGENTS_MIN_INTERVAL = 0.5
+_subagents_dir_override: str | None = None
+_subagents_last_write = 0.0
+_subagents_last_payload: dict | None = None
+_subagents_own_path: str | None = None
+
+
+def _subagents_dir() -> str:
+    if _subagents_dir_override is not None:
+        return _subagents_dir_override
+    base = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
+    return os.path.join(base, "data", "hermes-subagents")
+
+
+def _subagents_source():
+    """The registry backend (view or in-process); None when unresolvable. Test seam."""
+    try:
+        from hermes_cli.gateway_tools import process_view, LocalSubagents
+        view = process_view()
+        if view is not None:
+            return view
+        if _active_cli is not None:
+            return LocalSubagents(_active_cli)
+    except Exception:
+        return None
+    return None
+
+
+def _roster_child(row: dict) -> dict:
+    age = row.get("running_seconds")
+    if not isinstance(age, (int, float)):
+        started = row.get("started_at")
+        age = (time.time() - started) if isinstance(started, (int, float)) else None
+    return {
+        "id": row.get("subagent_id"),
+        "task": _message_text(row.get("goal")),
+        "state": row.get("status"),
+        "activity": row.get("last_tool") or None,
+        "age_s": int(age) if isinstance(age, (int, float)) else None,
+    }
+
+
+def _subagents_write(path: str, payload: dict) -> None:
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+    os.replace(tmp, path)
+
+
+def _subagents_sample() -> str | None:
+    global _subagents_last_write, _subagents_last_payload, _subagents_own_path
+    if not _vitals_enabled():
+        return None
+    now = time.monotonic()
+    if _subagents_last_payload is not None and now - _subagents_last_write < _SUBAGENTS_MIN_INTERVAL:
+        return None
+    source = _subagents_source()
+    if source is None:
+        return None
+    try:
+        rows = source.subagent_rows(busy=bool(getattr(_active_cli, "_agent_running", False)))
+    except Exception:
+        return None
+    children = [_roster_child(r) for r in (rows or []) if isinstance(r, dict)]
+    path = os.path.join(_subagents_dir(), f"{os.environ['HC_TERMINAL_ID']}.json")
+    payload = {"v": 1, "term": os.environ["HC_TERMINAL_ID"], "ts": time.time(),
+               "children": children}
+    if not children:
+        # active-only rule: an empty roster removes the file; never write an empty one
+        if _subagents_last_payload is not None and _subagents_last_payload.get("children"):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        elif _subagents_last_payload is None and os.path.exists(path):
+            os.unlink(path)  # ours: the gate means one process per terminal address
+        _subagents_last_write = now
+        _subagents_last_payload = payload
+        _subagents_own_path = None
+        return None
+    if _subagents_last_payload is not None and payload == _subagents_last_payload:
+        return None
+    try:
+        _subagents_write(path, payload)
+    except Exception:
+        return None
+    _subagents_last_write = now
+    _subagents_last_payload = payload
+    _subagents_own_path = path
+    return path
+
+
+def _subagents_cleanup() -> None:
+    """Remove our own roster file; never raises."""
+    global _subagents_own_path
+    path, _subagents_own_path = _subagents_own_path, None
+    if path:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
+
+def _subagents_reset_for_tests(dirpath=None) -> None:
+    """Fresh module state, optional directory override; tests only."""
+    global _subagents_dir_override, _subagents_last_write, _subagents_last_payload, _subagents_own_path
+    _subagents_dir_override = str(dirpath) if dirpath is not None else None
+    _subagents_last_write = 0.0
+    _subagents_last_payload = None
+    _subagents_own_path = None
 
 
 def _suppress_status_bar_window(cli_mod) -> None:
@@ -551,6 +676,7 @@ def _on_exit() -> None:
         return
     finally:
         _vitals_cleanup()
+        _subagents_cleanup()
 
 
 def _install_exit_clear() -> None:
