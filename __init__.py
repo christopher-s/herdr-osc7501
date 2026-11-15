@@ -513,7 +513,8 @@ def _subagents_sample() -> str | None:
         return None
     try:
         _subagents_write(path, payload)
-    except Exception:
+    except Exception as exc:
+        _subagents_diag(repr(exc))
         return None
     _subagents_last_write = now
     _subagents_last_payload = payload

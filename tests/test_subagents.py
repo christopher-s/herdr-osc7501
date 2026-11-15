@@ -166,6 +166,20 @@ class Subagents(unittest.TestCase):
         self.assertTrue(diag.exists())
         self.assertIn("gateway away", json.loads(diag.read_text())["err"])
 
+    def test_write_failure_diagnoses_without_file(self):
+        self.gate()
+        self.source([row()])
+
+        def boom(path, payload):
+            raise RuntimeError("disk sulks")
+
+        self.plugin._subagents_write = boom
+        self.assertIsNone(self.plugin._subagents_sample())
+        self.assertEqual(self.files(), [])
+        diag = Path(self.tmp.name) / ".diag-t9.json"
+        self.assertTrue(diag.exists())
+        self.assertIn("disk sulks", json.loads(diag.read_text())["err"])
+
     def test_write_is_atomic_and_valid_json(self):
         self.gate()
         self.source([row()])
