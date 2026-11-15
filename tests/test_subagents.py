@@ -58,7 +58,8 @@ class Subagents(unittest.TestCase):
         return stub
 
     def files(self):
-        return sorted(p.name for p in Path(self.tmp.name).iterdir())
+        return sorted(p.name for p in Path(self.tmp.name).iterdir()
+                      if not p.name.startswith("."))
 
     def test_gate_off_writes_no_file(self):
         self.source([row()])
@@ -147,6 +148,9 @@ class Subagents(unittest.TestCase):
         self.plugin._subagents_source = lambda: None
         self.assertIsNone(self.plugin._subagents_sample())
         self.assertEqual(self.files(), [])
+        diag = Path(self.tmp.name) / ".diag-t9.json"
+        self.assertTrue(diag.exists())
+        self.assertIn("no-source", json.loads(diag.read_text())["err"])
 
     def test_source_exception_fails_open_silently(self):
         self.gate()
@@ -158,6 +162,9 @@ class Subagents(unittest.TestCase):
         self.plugin._subagents_source = lambda: Boom()
         self.assertIsNone(self.plugin._subagents_sample())
         self.assertEqual(self.files(), [])
+        diag = Path(self.tmp.name) / ".diag-t9.json"
+        self.assertTrue(diag.exists())
+        self.assertIn("gateway away", json.loads(diag.read_text())["err"])
 
     def test_write_is_atomic_and_valid_json(self):
         self.gate()

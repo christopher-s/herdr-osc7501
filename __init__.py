@@ -413,6 +413,7 @@ _subagents_dir_override: str | None = None
 _subagents_last_write = 0.0
 _subagents_last_payload: dict | None = None
 _subagents_own_path: str | None = None
+_subagents_diag_written: str | None = None
 
 
 def _subagents_dir() -> str:
@@ -423,17 +424,33 @@ def _subagents_dir() -> str:
 
 
 def _subagents_source():
-    """The registry backend (view or in-process); None when unresolvable. Test seam."""
-    try:
-        from hermes_cli.gateway_tools import process_view, LocalSubagents
-        view = process_view()
-        if view is not None:
-            return view
-        if _active_cli is not None:
-            return LocalSubagents(_active_cli)
-    except Exception:
+    """The registry backend (view or in-process); None when unresolvable. Test seam.
+    Architecture rule: the plugin never imports hermes_cli modules at call time
+    (a function-local import from inside the plugin fires the plugin's own
+    import hook) — resolve from sys.modules the way the import hook does."""
+    gt = sys.modules.get("hermes_cli.gateway_tools")
+    if gt is None:
         return None
+    view = gt.process_view()
+    if view is not None:
+        return view
+    if _active_cli is not None:
+        return gt.LocalSubagents(_active_cli)
     return None
+
+
+def _subagents_diag(reason: str) -> None:
+    """One line of truth per failure reason, written once; never raises."""
+    global _subagents_diag_written
+    if _subagents_diag_written == reason:
+        return
+    _subagents_diag_written = reason
+    try:
+        path = os.path.join(_subagents_dir(), f".diag-{os.environ['HC_TERMINAL_ID']}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"err": reason, "ts": time.time()}, fh)
+    except Exception:
+        pass
 
 
 def _roster_child(row: dict) -> dict:
@@ -468,10 +485,12 @@ def _subagents_sample() -> str | None:
         return None
     source = _subagents_source()
     if source is None:
+        _subagents_diag("no-source")
         return None
     try:
         rows = source.subagent_rows(busy=bool(getattr(_active_cli, "_agent_running", False)))
-    except Exception:
+    except Exception as exc:
+        _subagents_diag(repr(exc))
         return None
     children = [_roster_child(r) for r in (rows or []) if isinstance(r, dict)]
     path = os.path.join(_subagents_dir(), f"{os.environ['HC_TERMINAL_ID']}.json")
@@ -515,11 +534,13 @@ def _subagents_cleanup() -> None:
 
 def _subagents_reset_for_tests(dirpath=None) -> None:
     """Fresh module state, optional directory override; tests only."""
-    global _subagents_dir_override, _subagents_last_write, _subagents_last_payload, _subagents_own_path
+    global _subagents_dir_override, _subagents_last_write, _subagents_last_payload
+    global _subagents_own_path, _subagents_diag_written
     _subagents_dir_override = str(dirpath) if dirpath is not None else None
     _subagents_last_write = 0.0
     _subagents_last_payload = None
     _subagents_own_path = None
+    _subagents_diag_written = None
 
 
 def _suppress_status_bar_window(cli_mod) -> None:
