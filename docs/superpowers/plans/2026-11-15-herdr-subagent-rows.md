@@ -1,6 +1,9 @@
 # Hermes sub-agent sidebar rows in Herdr (live-only)
 
-Date: 2026-11-15. Status: approved 2026-11-15 — building. Spans two repos:
+Date: 2026-11-15. Status: WITHDRAWN at Chris's request; runtime changes reverted.
+Historical plan only. See ../../2026-11-15-subagent-integration-withdrawn.md
+for implementation details, review findings, preserved diffs and rollback verification.
+Spanned two repos:
 this one (plugin = data producer) and `christopher-s/herdr-mods`
 (agents-hermes clone = renderer). Supersedes the 2026-11-14 decision that
 kept in-process delegate children off the sidebar (the active-only rule is

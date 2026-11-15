@@ -109,19 +109,3 @@ When Hermes runs inside an hc terminal (`$HC_TERMINAL_ID` set, address like
 `prompt_elapsed`, `state`. Writes are atomic, throttled to 500 ms, deduped,
 and fail-open; the file is removed on exit. Bare-terminal and tmux Hermes
 never write vitals. Herdr mods read the directory; the file is the contract.
-
-## Subagent roster sidecar (1.4.0)
-
-One JSON file per Herdr terminal under `~/.config/herdr-app/data/hermes-subagents/`, named by
-`$HC_TERMINAL_ID` — the same gate as vitals (bare-terminal and tmux Hermes write nothing). It lists only
-the session's **live** children (delegate_task batch, `/review`, the public lifecycle API — all one live
-registry); an empty roster **removes** the file, so Herdr mods show sub rows only while children are
-alive. Source: the same registry backend the CLI monitor and dock consult (the gateway session's view
-when its children run there, else this process's own registry). Sampling runs on the vitals heartbeat;
-the registry source's own ≤1 rps poll governs RPCs, and writes happen only when the roster changed.
-
-`{"v": 1, "term": "t1q", "ts": 0, "children": [{"id": "sa-3-9f2c", "task": "Review for regressions",
-"state": "running", "activity": "web_search", "age_s": 12}]}` — `task` is the goal's sanitized first
-line (120-char cap); `state`, `activity` and `age_s` carry exactly what the registry knows per child,
-no invented granularity. Atomic, deduped, fail-open, removed on exit; the plugin's only reader is the
-Herdr agents mod.
